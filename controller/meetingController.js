@@ -107,7 +107,8 @@ exports.updateEventType = async (req, res) => {
     }
 
     const allowedFields = [
-      "title", "description", "duration", "price", "currency", "color",
+      "title", "description", "duration", "locationType", "locationDetails",
+      "price", "currency", "color",
       "availability", "bufferBefore", "bufferAfter", "customQuestions", "isActive",
     ];
     const updates = Object.fromEntries(
