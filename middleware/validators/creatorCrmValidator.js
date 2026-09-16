@@ -87,7 +87,7 @@ const validateInvoice = validateRequest([
   body('status')
     .optional()
     .trim()
-    .isIn(['draft', 'sent', 'pending', 'paid', 'overdue', 'cancelled'])
+    .isIn(['draft', 'pending', 'paid', 'overdue', 'cancelled'])
     .withMessage('Invalid invoice status'),
   body('dueDate')
     .optional({ checkFalsy: true })
