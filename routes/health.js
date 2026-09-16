@@ -29,24 +29,24 @@ router.get("/health", async (req, res) => {
 
   let redisStatus = "not_configured";
   if (hasRedisConfig()) {
+    let redisClient = null;
     try {
-      const redisClient = createRedisClient();
+      redisClient = createRedisClient();
       if (redisClient) {
         await Promise.race([
           redisClient.ping(),
           new Promise((_, reject) => setTimeout(() => reject(new Error("Redis health check timed out")), 2000)),
         ]);
-        if (redisClient.status === "ready" || redisClient.status === "connect" || redisClient.mode === "upstash-rest") {
-          redisStatus = "connected";
-        } else {
-          redisStatus = "configured";
-        }
-        if (typeof redisClient.quit === "function") {
-          redisClient.quit().catch(() => {});
-        }
+        redisStatus = "connected";
       }
     } catch (err) {
       redisStatus = "error";
+    } finally {
+      if (redisClient && typeof redisClient.quit === "function") {
+        try { await redisClient.quit(); } catch (e) { /* ignore cleanup errors */ }
+      }
+    }
+    if (redisStatus !== "connected") {
       isHealthy = false;
     }
   }
