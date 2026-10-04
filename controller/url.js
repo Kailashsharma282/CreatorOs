@@ -6,6 +6,8 @@ const bcrypt = require("bcryptjs"); // swap to 'bcrypt' if that's what model/use
 const net = require("net");
 const dns = require("dns").promises;
 const Url = require("../model/url");
+const dns = require("dns");
+const net = require("net");
 const { isValidUrl } = require("../utils/validators");
 const asyncHandler = require("../utils/asyncHandler");
 
@@ -96,6 +98,7 @@ async function validateURL(urlString) {
 async function fetchWebsiteTitle(url, fallback) {
   if (fallback) return fallback;
   try {
+    await validateURL(url);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
     const response = await fetch(url, {
@@ -213,8 +216,8 @@ async function handleGenerateShortURL(req, res) {
 
   try {
     await validateURL(redirectUrl);
-  } catch (error) {
-    return res.status(400).json({ error: error.message });
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message });
   }
 
   // Duplicate detection: same user, same destination, not archived.
@@ -447,6 +450,16 @@ const handleGenerateShortUrlRender = asyncHandler(async (req, res) => {
   const { redirectUrl, url, campaignName, qrFgColor, qrBgColor } = req.body;
   const inputUrl = redirectUrl || url;
 
+  try {
+    await validateURL(inputUrl);
+  } catch (err) {
+    return res.status(400).render("home", {
+      urls: await Url.find({ userId: req.user?.id || null }).sort({ _id: -1 }).limit(20).lean(),
+      error: err.message,
+      id: null, shortUrl: null, qrCode: null, campaignName: ""
+    });
+  }
+
   if (!inputUrl || !isValidUrl(inputUrl)) {
     // Implement cursor-based pagination to avoid loading all records
     const pageSize = 20;
@@ -535,8 +548,8 @@ const handleGetQRCode = asyncHandler(async (req, res) => {
       light: entry.qrBgColor || "#ffffff",
     },
     errorCorrectionLevel: "M",
-    margin: 2,
-    width: 256,
+    margin: 4,
+    width: 512,
   });
 
   Url.findOneAndUpdate({ shortId }, { $set: { qrGenerated: true } }).catch(
@@ -701,11 +714,7 @@ const handleDeleteShortURL = asyncHandler(async (req, res) => {
       });
   }
 
-  if (Url.findByIdAndDelete) {
-    await Url.findByIdAndDelete(entry._id || shortId);
-  } else if (Url.deleteOne) {
-    await Url.deleteOne({ shortId });
-  }
+  await Url.findByIdAndDelete(entry._id);
 
   return res.json({
     success: true,
@@ -736,6 +745,11 @@ const handleUpdateShortURL = asyncHandler(async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "Invalid destination URL" });
+    }
+    try {
+      await validateURL(redirectUrl);
+    } catch (err) {
+      return res.status(400).json({ success: false, message: err.message });
     }
     updates.redirectUrl = redirectUrl;
   }
@@ -872,10 +886,13 @@ const handleBulkImport = asyncHandler(async (req, res) => {
 
   for (const row of rows) {
     if (!row.redirectUrl || !isValidUrl(row.redirectUrl)) {
-      skipped.push({
-        input: row.redirectUrl || "(empty)",
-        reason: "Invalid URL",
-      });
+      skipped.push({ input: row.redirectUrl || "(empty)", reason: "Invalid URL" });
+      continue;
+    }
+    try {
+      await validateURL(row.redirectUrl);
+    } catch (err) {
+      skipped.push({ input: row.redirectUrl, reason: err.message });
       continue;
     }
 

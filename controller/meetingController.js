@@ -29,11 +29,22 @@ function publicErrorMessage(error) {
 }
 
 async function findCreatorByAliasOrName(identifier) {
-  let creator = await User.findOne({ alias: identifier });
+  let creator = await User.findOne({
+    $or: [
+      { alias: identifier },
+      { nameSlug: identifier.toLowerCase() }
+    ],
+    role: "creator"
+  });
+
+  // Graceful fallback for legacy users without a nameSlug
   if (!creator) {
-    const users = await User.find({ role: "creator" });
-    creator = users.find((u) => slugify(u.name) === identifier.toLowerCase() || u.alias === identifier);
+    creator = await User.findOne({
+      name: { $regex: new RegExp("^" + identifier.replace(/-/g, '.*') + "$", "i") },
+      role: "creator"
+    });
   }
+
   if (!creator && identifier.match(/^[0-9a-fA-F]{24}$/)) {
     creator = await User.findById(identifier);
   }
@@ -46,7 +57,7 @@ async function findCreatorByAliasOrName(identifier) {
 
 exports.getEventTypes = async (req, res) => {
   try {
-    const eventTypes = await EventType.find({ userId: req.user._id }).sort({ createdAt: -1 });
+    const eventTypes = await EventType.find({ userId: req.user._id }).sort({ createdAt: -1 }).lean();
     return res.status(200).json({ success: true, count: eventTypes.length, data: eventTypes });
   } catch (error) {
     return res.status(500).json({ success: false, message: publicErrorMessage(error) });
@@ -66,12 +77,12 @@ exports.createEventType = async (req, res) => {
 
     let slug = baseSlug;
     let count = 1;
-    while (await EventType.findOne({ userId: req.user._id, slug })) {
+    while (await EventType.findOne({ userId: req.user.id, slug })) {
       slug = `${baseSlug}-${count++}`;
     }
 
     const eventType = await EventType.create({
-      userId: req.user._id,
+      userId: req.user.id,
       title,
       slug,
       description: description || "",
@@ -101,7 +112,7 @@ exports.createEventType = async (req, res) => {
 exports.updateEventType = async (req, res) => {
   try {
     const { id } = req.params;
-    let eventType = await EventType.findOne({ _id: id, userId: req.user._id });
+    let eventType = await EventType.findOne({ _id: id, userId: req.user.id });
 
     if (!eventType) {
       return res.status(404).json({ success: false, message: "Event type not found" });
@@ -122,7 +133,7 @@ exports.updateEventType = async (req, res) => {
       let baseSlug = slugify(updates.title);
       let slug = baseSlug;
       let count = 1;
-      while (await EventType.findOne({ userId: req.user._id, slug, _id: { $ne: id } })) {
+      while (await EventType.findOne({ userId: req.user.id, slug, _id: { $ne: id } })) {
         slug = `${baseSlug}-${count++}`;
       }
       updates.slug = slug;
@@ -138,7 +149,7 @@ exports.updateEventType = async (req, res) => {
 exports.deleteEventType = async (req, res) => {
   try {
     const { id } = req.params;
-    const eventType = await EventType.findOneAndDelete({ _id: id, userId: req.user._id });
+    const eventType = await EventType.findOneAndDelete({ _id: id, userId: req.user.id });
 
     if (!eventType) {
       return res.status(404).json({ success: false, message: "Event type not found" });
@@ -156,7 +167,7 @@ exports.deleteEventType = async (req, res) => {
 
 exports.getUserBookings = async (req, res) => {
   try {
-    const bookings = await MeetingBooking.find({ userId: req.user._id })
+    const bookings = await MeetingBooking.find({ userId: req.user.id })
       .populate("eventTypeId", "title duration color price locationType")
       .sort({ startTime: 1 });
 
@@ -186,7 +197,7 @@ exports.cancelBooking = async (req, res) => {
     }
 
     // Check ownership if requested by logged in user
-    if (req.user && booking.userId.toString() !== req.user._id.toString()) {
+    if (req.user && booking.userId.toString() !== req.user.id.toString()) {
       return res.status(403).json({ success: false, message: "Unauthorized to cancel this booking" });
     }
 
@@ -207,9 +218,9 @@ exports.cancelBooking = async (req, res) => {
 
 exports.getGoogleCalendarStatus = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findById(req.user.id);
     const tokens = user.googleCalendarTokens || {};
-    const state = generateState(req.user._id.toString());
+    const state = generateState(req.user.id.toString());
     const authUrl = GoogleCalendarService.getAuthUrl(state);
 
     return res.status(200).json({
@@ -225,12 +236,12 @@ exports.getGoogleCalendarStatus = async (req, res) => {
 
 exports.connectGoogleCalendar = async (req, res) => {
   try {
-    const state = generateState(req.user._id.toString());
+    const state = generateState(req.user.id.toString());
     const authUrl = GoogleCalendarService.getAuthUrl(state);
     if (authUrl) {
       return res.redirect(authUrl);
     }
-    await GoogleCalendarService.handleCallback("mock_code", req.user._id.toString());
+    await GoogleCalendarService.handleCallback("mock_code", req.user.id.toString());
     return res.redirect("/services/meetings?googleConnected=1");
   } catch (error) {
     return res.redirect("/services/meetings?error=" + encodeURIComponent(publicErrorMessage(error)));
@@ -255,7 +266,7 @@ exports.googleCalendarCallback = async (req, res) => {
 
 exports.disconnectGoogleCalendar = async (req, res) => {
   try {
-    await User.findByIdAndUpdate(req.user._id, {
+    await User.findByIdAndUpdate(req.user.id, {
       googleCalendarTokens: {
         accessToken: null,
         refreshToken: null,
@@ -425,14 +436,52 @@ exports.createBooking = async (req, res) => {
 
     const end = new Date(start.getTime() + eventType.duration * 60 * 1000);
 
+    const availability = eventType.availability || {};
+    const availabilityTimeZone = availability.timeZone || "UTC";
+    let localParts;
+    try {
+      localParts = new Intl.DateTimeFormat("en-US", {
+        timeZone: availabilityTimeZone,
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).formatToParts(start).reduce((parts, part) => {
+        parts[part.type] = part.value;
+        return parts;
+      }, {});
+    } catch (error) {
+      return res.status(400).json({ success: false, message: "Event availability timezone is invalid" });
+    }
+
+    const weekdayMap = { Sun: "sun", Mon: "mon", Tue: "tue", Wed: "wed", Thu: "thu", Fri: "fri", Sat: "sat" };
+    const allowedDays = availability.days || ["mon", "tue", "wed", "thu", "fri"];
+    const localStartMinutes = Number(localParts.hour) * 60 + Number(localParts.minute);
+    const [startHour, startMinute] = (availability.startTime || "09:00").split(":").map(Number);
+    const [endHour, endMinute] = (availability.endTime || "17:00").split(":").map(Number);
+    const windowStart = startHour * 60 + startMinute;
+    const windowEnd = endHour * 60 + endMinute;
+    const endLocalParts = new Intl.DateTimeFormat("en-US", {
+      timeZone: availabilityTimeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(end).reduce((parts, part) => {
+      parts[part.type] = part.value;
+      return parts;
+    }, {});
+    const localEndMinutes = Number(endLocalParts.hour) * 60 + Number(endLocalParts.minute);
+
+    if (!allowedDays.includes(weekdayMap[localParts.weekday]) || localStartMinutes < windowStart || localEndMinutes > windowEnd) {
+      return res.status(409).json({ success: false, message: "This time is outside the event availability window" });
+    }
+
     // Conflict check
     const existingConflict = await MeetingBooking.findOne({
       userId: creator._id,
       status: "scheduled",
-      $or: [
-        { startTime: { $lt: end, $gte: start } },
-        { endTime: { $gt: start, $lte: end } },
-      ],
+      startTime: { $lt: end },
+      endTime: { $gt: start },
     });
 
     if (existingConflict) {
@@ -485,3 +534,5 @@ exports.createBooking = async (req, res) => {
     return res.status(500).json({ success: false, message: publicErrorMessage(error) });
   }
 };
+
+
